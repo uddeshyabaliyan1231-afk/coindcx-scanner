@@ -132,8 +132,10 @@ app.get("/api/candles", async (req, res) => {
     const data = await getJSON(url);
 
     if (!Array.isArray(data)) {
-      throw new Error("Unexpected candle response format");
-    }
+  throw new Error(
+    "Unexpected candle response: " + JSON.stringify(data).slice(0, 500)
+  );
+}
 
     console.log(`[CANDLES] ${pair}: received ${data.length} candles`);
 
