@@ -131,15 +131,24 @@ app.get("/api/candles", async (req, res) => {
 
     const data = await getJSON(url);
 
-    if (!Array.isArray(data)) {
+    const data = await getJSON(url);
+
+const candles = Array.isArray(data)
+  ? data
+  : (data && Array.isArray(data.data) && data.s === "ok")
+    ? data.data
+    : null;
+
+if (!candles) {
   throw new Error(
-    "Unexpected candle response: " + JSON.stringify(data).slice(0, 500)
+    "Invalid CoinDCX candle response: " +
+    JSON.stringify(data).slice(0, 500)
   );
 }
 
-    console.log(`[CANDLES] ${pair}: received ${data.length} candles`);
+console.log(`[CANDLES] ${pair}: received ${candles.length} candles`);
 
-    res.json(data);
+res.json(candles);
 
   } catch (error) {
     console.error(
