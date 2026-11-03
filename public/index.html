@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>CoinDCX Scanner</title>
+<style>
+body{margin:0;background:#101a2c;color:#e8eef8;font:15px Arial;padding:16px}
+h1{font-size:24px;color:#fff}
+p{color:#9fb1ca}
+button{padding:14px;border:0;border-radius:10px;margin:5px;background:#20bd8c;color:#06251c;font-weight:bold}
+button.stop{background:#33445d;color:white}
+.box{background:#1d304b;padding:15px;border-radius:12px;margin:12px 0}
+.num{font-size:27px;font-weight:bold}
+table{width:100%;border-collapse:collapse;font-size:12px}
+td,th{padding:10px;border-bottom:1px solid #354963;text-align:left}
+.wrap{overflow-x:auto}
+.good{color:#39d6a4}.bad{color:#ff7979}
+</style>
+</head>
+<body>
+<h1>50° MA TOUCH SCANNER</h1>
+<p>CoinDCX USDT Futures | 15-minute timeframe | CoinDCX only</p>
+
+<button onclick="scan()">SCAN ONCE</button>
+<button class="stop" onclick="stopScan()">STOP</button>
+
+<div class="box" id="status">Ready to scan</div>
+<div class="box">Pairs discovered: <span class="num" id="pairs">0</span></div>
+<div class="box">Pairs checked: <span class="num" id="checked">0</span></div>
+<div class="box">Current matches: <span class="num" id="matches">0</span></div>
+<div class="box">API errors: <span class="num" id="errors">0</span></div>
+
+<div class="box">
+<h3>Seven mandatory conditions</h3>
+1. SMA 9 below SMA 200<br><br>
+2. SMA 20 below SMA 200<br><br>
+3. SMA 50 below SMA 200<br><br>
+4. SMA 50 angle rounds to -50°<br><br>
+5. Upward correction touches SMA 50<br><br>
+6. Stochastic RSI rounds to 100<br><br>
+7. RSI rounds to 50
+</div>
+
+<div class="box">
+<h3 class="good">Current matches</h3>
+<div class="wrap"><table>
+<thead><tr><th>Pair</th><th>Price</th><th>SMA50</th><th>Angle</th><th>Stoch</th><th>RSI</th></tr></thead>
+<tbody id="results"><tr><td colspan="6">No scan yet</td></tr></tbody>
+</table></div>
+</div>
+
+<div class="box">
+<h3>Previous 24-hour matches</h3>
+<div class="wrap"><table>
+<thead><tr><th>Pair</th><th>Time</th><th>Price</th><th>Angle</th><th>Stoch</th><th>RSI</th></tr></thead>
+<tbody id="history"><tr><td colspan="6">No scan yet</td></tr></tbody>
+</table></div>
+</div>
+
+<script>
+let stopped=false,busy=false;
+const $=id=>document.getElementById(id);
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+
+function sma(a,n,i){
+ if(i+1<n)return null;
+ let s=0;
+ for(let j=i-n+1;j<=i;j++)s+=a[j];
+ return s/n;
+}
+function rsi(a,n=14){
+ let out=Array(a.length).fill(null),g=0,l=0;
+ for(let i=1;i<=n;i++){
+  let d=a[i]-a[i-1];g+=Math.max(d,0);l+=Math.max(-d,0);
+ }
+ g/=n;l/=n;
+ out[n]=l===0?100:100-100/(1+g/l);
+ for(let i=n+1;i<a.length;i++){
+  let d=a[i]-a[i-1];
+  g=(g*(n-1)+Math.max(d,0))/n;
+  l=(l*(n-1)+Math.max(-d,0))/n;
+  out[i]=l===0?100:100-100/(1+g/l);
+ }
+ return out;
+}
+function stochRSI(rv,i,n=14){
+ if(i<n||rv[i]===null)return null;
+ let a=rv.slice(i-n+1,i+1);
+ if(a.some(x=>x===null))return null;
+ let lo=Math.min(...a),hi=Math.max(...a);
+ return hi===lo?0:(rv[i]-lo)/(hi-lo)*100;
+}
+function atr(c,i,n=14){
+ if(i<n)return null;
+ let sum=0;
+ for(let j=i-n+1;j<=i;j++){
+  let prev=c[j-1].close;
+  sum+=Math.max(c[j].high-c[j].low,Math.abs(c[j].high-prev),Math.abs(c[j].low-prev));
+ }
+ return sum/n;
+}
+function angle(values,c,i){
+ let y=values.slice(i-4,i+1);
+ if(y.length<5||y.some(x=>x===null))return null;
+ let mx=2,my=y.reduce((a,b)=>a+b,0)/5,num=0,den=0;
+ for(let j=0;j<5;j++){num+=(j-mx)*(y[j]-my);den+=(j-mx)**2}
+ let a=atr(c,i);
+ if(!a)return null;
+ return Math.atan((num/den)/a)*180/Math.PI;
+}
+function parseCandles(raw){
+ let a=Array.isArray(raw)?raw:(raw.data||raw.candlesticks||[]);
+ return a.map(x=>{
+  if(Array.isArray(x))return {time:+x[0],open:+x[1],high:+x[2],low:+x[3],close:+x[4],volume:+x[5]||0};
+  return {time:+(x.time||x.timestamp),open:+x.open,high:+x.high,low:+x.low,close:+x.close,volume:+x.volume||0};
+ }).filter(x=>x.time&&Number.isFinite(x.close)).sort((a,b)=>a.time-b.time);
+}
+function aggregate(a){
+ let m=new Map();
+ for(const x of a){
+  let t=Math.floor(x.time/900000)*900000;
+  if(!m.has(t))m.set(t,{time:t,open:x.open,high:x.high,low:x.low,close:x.close,volume:x.volume});
+  else{
+   let z=m.get(t);z.high=Math.max(z.high,x.high);z.low=Math.min(z.low,x.low);
+   z.close=x.close;z.volume+=x.volume;
+  }
+ }
+ return [...m.values()].sort((a,b)=>a.time-b.time);
+}
+function matches(c){
+ if(c.length<210)return [];
+ let close=c.map(x=>x.close),rv=rsi(close),s9=[],s20=[],s50=[],s200=[];
+ for(let i=0;i<c.length;i++){
+  s9[i]=sma(close,9,i);s20[i]=sma(close,20,i);
+  s50[i]=sma(close,50,i);s200[i]=sma(close,200,i);
+ }
+ let out=[],now=Date.now(),start=now-86400000;
+ for(let i=200;i<c.length;i++){
+  if(!s9[i]||!s20[i]||!s50[i]||!s200[i])continue;
+  let st=stochRSI(rv,i),r=rv[i],ang=angle(s50,c,i);
+  if(st===null||r===null||ang===null)continue;
+  let touch=i>0&&c[i].close>c[i-1].close&&
+   c[i-1].close<s50[i-1]&&c[i].low<=s50[i]&&c[i].high>=s50[i];
+  let ok=s9[i]<s200[i]&&s20[i]<s200[i]&&s50[i]<s200[i]&&
+   Math.round(ang)===-50&&touch&&Math.round(st)===100&&Math.round(r)===50;
+  if(ok&&c[i].time>=start)out.push({
+   time:c[i].time,price:c[i].close,sma:s50[i],angle:ang,stoch:st,rsi:r
+  });
+ }
+ return out;
+}
+async function scanPair(pair){
+ let to=Math.floor(Date.now()/1000),from=to-4*86400;
+ let url='/api/candles?pair='+encodeURIComponent(pair)+'&from='+from+'&to='+to;
+ let res=await fetch(url);
+ if(!res.ok)throw Error('Candle HTTP '+res.status);
+ let raw=await res.json(),candles=aggregate(parseCandles(raw));
+ return matches(candles);
+}
+async function scan(){
+ if(busy)return;
+ busy=true;stopped=false;
+ $('status').textContent='Connecting to CoinDCX...';
+ $('results').innerHTML='';$('history').innerHTML='';
+ $('checked').textContent='0';$('errors').textContent='0';
+ try{
+  let response=await fetch('/api/pairs');
+  if(!response.ok)throw Error('Pair discovery HTTP '+response.status);
+  let data=await response.json();
+  if(!data.success)throw Error(data.error||'Pair discovery failed');
+  let raw=data.pairs;
+  let pairs=(Array.isArray(raw)?raw:[]).map(x=>
+   typeof x==='string'?x:(x.pair||x.instrument||x.symbol||'')
+  ).filter(x=>/^B-[A-Z0-9]+_USDT$/.test(x));
+  pairs=[...new Set(pairs)];
+  $('pairs').textContent=pairs.length;
+  if(!pairs.length)throw Error('CoinDCX returned no USDT futures pairs');
+  let current=[],history=[],checked=0,errors=0,index=0;
+  $('status').textContent='Scanning '+pairs.length+' CoinDCX pairs...';
+  async function worker(){
+   while(index<pairs.length&&!stopped){
+    let pair=pairs[index++];
+    try{
+     let found=await scanPair(pair);
+     for(let x of found){
+      let row={pair,...x};
+      history.push(row);
+      if(Date.now()-x.time<900000)current.push(row);
+     }
+    }catch(e){errors++}
+    checked++;
+    $('checked').textContent=checked;
+    $('errors').textContent=errors;
+    $('matches').textContent=current.length;
+    $('status').textContent='Scanning '+checked+' / '+pairs.length;
+   }
+  }
+  await Promise.all([worker(),worker(),worker()]);
+  if(stopped){$('status').textContent='Scan stopped';return}
+  $('matches').textContent=current.length;
+  $('results').innerHTML=current.length?current.map(x=>
+   `<tr><td>${x.pair}</td><td>${x.price}</td><td>${x.sma}</td><td>${Math.round(x.angle)}°</td><td>${Math.round(x.stoch)}</td><td>${Math.round(x.rsi)}</td></tr>`
+  ).join(''):'<tr><td colspan="6">No current matches</td></tr>';
+  $('history').innerHTML=history.length?history.map(x=>
+   `<tr><td>${x.pair}</td><td>${new Date(x.time).toLocaleString()}</td><td>${x.price}</td><td>${Math.round(x.angle)}°</td><td>${Math.round(x.stoch)}</td><td>${Math.round(x.rsi)}</td></tr>`
+  ).join(''):'<tr><td colspan="6">No historical matches</td></tr>';
+  $('status').textContent='Scan complete. '+checked+' pairs checked; '+errors+' errors.';
+ }catch(e){$('status').textContent='ERROR: '+e.message}
+ finally{busy=false}
+}
+function stopScan(){stopped=true;$('status').textContent='Stopping scan...'}
+</script>
+</body>
+</html>
