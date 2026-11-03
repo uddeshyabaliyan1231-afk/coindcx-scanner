@@ -5,42 +5,43 @@ const path = require("path");
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+// CoinDCX API request
 function getJSON(url) {
   return new Promise((resolve, reject) => {
     const request = https.get(
       url,
       {
         headers: {
-          "User-Agent": "CoinDCX-Scanner/2.0",
+          "User-Agent": "CoinDCX-Scanner/3.0",
           "Accept": "application/json"
         }
       },
-      (res) => {
-        let data = "";
+      (response) => {
+        let body = "";
 
-        res.on("data", chunk => {
-          data += chunk;
+        response.on("data", chunk => {
+          body += chunk;
         });
 
-        res.on("end", () => {
-          if (res.statusCode !== 200) {
+        response.on("end", () => {
+          if (response.statusCode !== 200) {
             return reject(
               new Error(
-                `CoinDCX HTTP ${res.statusCode}: ${data.slice(0, 300)}`
+                `CoinDCX HTTP ${response.statusCode}: ${body.slice(0, 500)}`
               )
             );
           }
 
           try {
-            resolve(JSON.parse(data));
+            resolve(JSON.parse(body));
           } catch (error) {
-            reject(new Error("Invalid JSON response: " + error.message));
+            reject(new Error("Invalid JSON: " + error.message));
           }
         });
       }
     );
 
-    request.setTimeout(15000, () => {
+    request.setTimeout(20000, () => {
       request.destroy(new Error("CoinDCX API timeout"));
     });
 
@@ -48,7 +49,7 @@ function getJSON(url) {
   });
 }
 
-// Website files
+// Website
 app.use(express.static(path.join(__dirname, "public")));
 
 // Health check
@@ -67,18 +68,21 @@ app.get("/api/pairs", async (req, res) => {
     const url =
       "https://api.coindcx.com/exchange/v1/derivatives/futures/data/active_instruments?margin_currency_short_name[]=USDT";
 
-    const data = await getJSON(url);
+    const instruments = await getJSON(url);
 
-    if (!Array.isArray(data)) {
-      throw new Error("Unexpected instruments response format");
+    if (!Array.isArray(instruments)) {
+      throw new Error(
+        "Invalid instruments response: " +
+        JSON.stringify(instruments).slice(0, 500)
+      );
     }
 
-    console.log(`[PAIRS] Received ${data.length} instruments`);
+    console.log(`[PAIRS] Received ${instruments.length} instruments`);
 
     res.json({
       success: true,
-      count: data.length,
-      pairs: data
+      count: instruments.length,
+      pairs: instruments
     });
 
   } catch (error) {
@@ -91,17 +95,16 @@ app.get("/api/pairs", async (req, res) => {
   }
 });
 
-// Get 5-minute candles (scanner can aggregate into 15-minute candles)
+// Get 5-minute candles
 app.get("/api/candles", async (req, res) => {
   try {
     const { pair, from, to } = req.query;
 
-    // Allow letters, numbers, underscore and hyphen in pair IDs
     if (!pair || !/^[A-Z0-9_-]+$/.test(pair)) {
       return res.status(400).json({
         success: false,
         error: "Invalid pair ID",
-        receivedPair: pair || null
+        pair: pair || null
       });
     }
 
@@ -116,7 +119,7 @@ app.get("/api/candles", async (req, res) => {
     ) {
       return res.status(400).json({
         success: false,
-        error: "Invalid from/to timestamps"
+        error: "Invalid timestamps"
       });
     }
 
@@ -129,26 +132,32 @@ app.get("/api/candles", async (req, res) => {
       "&to=" + end +
       "&resolution=5&pcode=f";
 
-    const data = await getJSON(url);
+    const response = await getJSON(url);
 
-    const data = await getJSON(url);
+    // CoinDCX response: { s: "ok", data: [...] }
+    const candles = Array.isArray(response)
+      ? response
+      : (
+          response &&
+          response.s === "ok" &&
+          Array.isArray(response.data)
+        )
+        ? response.data
+        : null;
 
-const candles = Array.isArray(data)
-  ? data
-  : (data && Array.isArray(data.data) && data.s === "ok")
-    ? data.data
-    : null;
+    if (!candles) {
+      throw new Error(
+        "Invalid CoinDCX candle response: " +
+        JSON.stringify(response).slice(0, 500)
+      );
+    }
 
-if (!candles) {
-  throw new Error(
-    "Invalid CoinDCX candle response: " +
-    JSON.stringify(data).slice(0, 500)
-  );
-}
+    console.log(
+      `[CANDLES] ${pair}: received ${candles.length} candles`
+    );
 
-console.log(`[CANDLES] ${pair}: received ${candles.length} candles`);
-
-res.json(candles);
+    // Send candle array to scanner
+    res.json(candles);
 
   } catch (error) {
     console.error(
