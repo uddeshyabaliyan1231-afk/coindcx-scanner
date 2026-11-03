@@ -7,51 +7,156 @@ const PORT = process.env.PORT || 3000;
 
 function getJSON(url) {
   return new Promise((resolve, reject) => {
-    https.get(url, { headers: { "User-Agent": "CoinDCX-Scanner/1.0" } }, res => {
-      let data = "";
-      res.on("data", chunk => data += chunk);
-      res.on("end", () => {
-        try {
-          if (res.statusCode !== 200) {
-            return reject(new Error("CoinDCX HTTP " + res.statusCode));
-          }
-          resolve(JSON.parse(data));
-        } catch (e) {
-          reject(e);
+    const request = https.get(
+      url,
+      {
+        headers: {
+          "User-Agent": "CoinDCX-Scanner/2.0",
+          "Accept": "application/json"
         }
-      });
-    }).on("error", reject);
+      },
+      (res) => {
+        let data = "";
+
+        res.on("data", chunk => {
+          data += chunk;
+        });
+
+        res.on("end", () => {
+          if (res.statusCode !== 200) {
+            return reject(
+              new Error(
+                `CoinDCX HTTP ${res.statusCode}: ${data.slice(0, 300)}`
+              )
+            );
+          }
+
+          try {
+            resolve(JSON.parse(data));
+          } catch (error) {
+            reject(new Error("Invalid JSON response: " + error.message));
+          }
+        });
+      }
+    );
+
+    request.setTimeout(15000, () => {
+      request.destroy(new Error("CoinDCX API timeout"));
+    });
+
+    request.on("error", reject);
   });
 }
 
+// Website files
 app.use(express.static(path.join(__dirname, "public")));
 
+// Health check
+app.get("/health", (req, res) => {
+  res.json({
+    status: "ok",
+    scanner: "CoinDCX"
+  });
+});
+
+// Get active USDT futures pairs
 app.get("/api/pairs", async (req, res) => {
   try {
-    const url = "https://api.coindcx.com/exchange/v1/derivatives/futures/data/active_instruments?margin_currency_short_name[]=USDT";
+    console.log("[PAIRS] Request started");
+
+    const url =
+      "https://api.coindcx.com/exchange/v1/derivatives/futures/data/active_instruments?margin_currency_short_name[]=USDT";
+
     const data = await getJSON(url);
-    res.json({ success: true, pairs: data });
-  } catch (e) {
-    res.status(502).json({ success: false, error: e.message });
+
+    if (!Array.isArray(data)) {
+      throw new Error("Unexpected instruments response format");
+    }
+
+    console.log(`[PAIRS] Received ${data.length} instruments`);
+
+    res.json({
+      success: true,
+      count: data.length,
+      pairs: data
+    });
+
+  } catch (error) {
+    console.error("[PAIRS ERROR]", error.message);
+
+    res.status(502).json({
+      success: false,
+      error: error.message
+    });
   }
 });
 
+// Get 5-minute candles (scanner can aggregate into 15-minute candles)
 app.get("/api/candles", async (req, res) => {
   try {
     const { pair, from, to } = req.query;
-    if (!pair || !/^[A-Z0-9_]+$/.test(pair)) {
-      return res.status(400).json({ error: "Invalid pair" });
+
+    // Allow letters, numbers, underscore and hyphen in pair IDs
+    if (!pair || !/^[A-Z0-9_-]+$/.test(pair)) {
+      return res.status(400).json({
+        success: false,
+        error: "Invalid pair ID",
+        receivedPair: pair || null
+      });
     }
-    const url = "https://public.coindcx.com/market_data/candlesticks?pair=" +
-      encodeURIComponent(pair) + "&from=" + Number(from) +
-      "&to=" + Number(to) + "&resolution=5&pcode=f";
+
+    const start = Number(from);
+    const end = Number(to);
+
+    if (
+      !Number.isFinite(start) ||
+      !Number.isFinite(end) ||
+      start <= 0 ||
+      end <= start
+    ) {
+      return res.status(400).json({
+        success: false,
+        error: "Invalid from/to timestamps"
+      });
+    }
+
+    console.log(`[CANDLES] Request: ${pair}`);
+
+    const url =
+      "https://public.coindcx.com/market_data/candlesticks?" +
+      "pair=" + encodeURIComponent(pair) +
+      "&from=" + start +
+      "&to=" + end +
+      "&resolution=5&pcode=f";
+
     const data = await getJSON(url);
+
+    if (!Array.isArray(data)) {
+      throw new Error("Unexpected candle response format");
+    }
+
+    console.log(`[CANDLES] ${pair}: received ${data.length} candles`);
+
     res.json(data);
-  } catch (e) {
-    res.status(502).json({ error: e.message });
+
+  } catch (error) {
+    console.error(
+      `[CANDLES ERROR] ${req.query.pair || "UNKNOWN"}:`,
+      error.message
+    );
+
+    res.status(502).json({
+      success: false,
+      pair: req.query.pair || null,
+      error: error.message
+    });
   }
 });
 
-app.get("/health", (req, res) => res.json({ status: "ok" }));
-
-app.listen(PORT, "0.0.0.0", () => console.log("Scanner running on " + PORT));
+// Start server
+app.listen(PORT, "0.0.0.0", () => {
+  console.log("================================");
+  console.log("CoinDCX Scanner Server Started");
+  console.log("Port:", PORT);
+  console.log("================================");
+});
