@@ -4,317 +4,366 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>50° MA Touch Scanner</title>
+<title>Supply Zone Short Scanner</title>
 <style>
-:root{color-scheme:dark}
 *{box-sizing:border-box}
-body{margin:0;background:#101a2c;color:#e8eef8;font:15px Arial;padding:16px}
-h1{font-size:24px;color:#fff}
-p{color:#9fb1ca;line-height:1.5}
-button{padding:14px 18px;border:0;border-radius:10px;margin:5px 5px 5px 0;background:#20bd8c;color:#06251c;font-weight:bold}
+body{margin:0;padding:16px;background:#111c2e;color:#edf3ff;font:15px Arial}
+h1{font-size:23px}
+p,.muted{color:#9fb1ca}
+button{padding:14px 20px;border:0;border-radius:9px;background:#20bd8c;color:#06251c;font-weight:bold;margin:5px 5px 5px 0}
+button.stop{background:#394b65;color:white}
 button:disabled{opacity:.5}
-.stop{background:#33445d;color:#fff}
-.box{background:#1d304b;padding:15px;border-radius:12px;margin:12px 0}
-.num{font-size:27px;font-weight:bold}
+.box{background:#1d304b;border-radius:12px;padding:15px;margin:12px 0}
+.num{font-size:25px;font-weight:bold}
 .wrap{overflow-x:auto}
-table{width:100%;border-collapse:collapse;font-size:12px;min-width:570px}
-td,th{padding:10px;border-bottom:1px solid #354963;text-align:left;white-space:nowrap}
-.good{color:#39d6a4}
-.muted{color:#9fb1ca;font-size:12px}
+table{width:100%;min-width:850px;border-collapse:collapse;font-size:12px}
+td,th{padding:10px;border-bottom:1px solid #3b4d65;text-align:left;white-space:nowrap}
+th{color:#9fb1ca}
+.good{color:#3de0a5}
+.warn{color:#ffc56b}
+.bad{color:#ff8585}
+.tag{display:inline-block;padding:4px 7px;border-radius:5px;background:#344963}
+.small{font-size:12px;color:#9fb1ca;line-height:1.5}
 </style>
 </head>
 <body>
 
-<h1>50° MA TOUCH SCANNER</h1>
-<p>CoinDCX USDT Futures | 15-minute timeframe | Completed candles only</p>
+<h1>SUPPLY ZONE SHORT SCANNER</h1>
+<p>CoinDCX USDT Futures | Weekly + Daily Supply | 1H + 15M Confirmation</p>
 
-<button id="scanBtn" onclick="scan()">SCAN ONCE</button>
+<button id="start" onclick="scan()">SCAN ALL COINS</button>
 <button class="stop" onclick="stopScan()">STOP</button>
 
-<div class="box" id="status">Ready to scan</div>
+<div class="box" id="status">Ready</div>
+
 <div class="box">Pairs discovered: <span class="num" id="pairs">0</span></div>
 <div class="box">Pairs checked: <span class="num" id="checked">0</span></div>
-<div class="box">Current matches: <span class="num" id="matches">0</span></div>
+<div class="box">Valid SHORT signals: <span class="num good" id="signals">0</span></div>
 <div class="box">API errors: <span class="num" id="errors">0</span></div>
 
 <div class="box">
-<h3>Seven mandatory conditions</h3>
-1. SMA 9 below SMA 200<br><br>
-2. SMA 20 below SMA 200<br><br>
-3. SMA 50 below SMA 200<br><br>
-4. SMA 50 ATR-normalized slope angle between -55° and -45°<br><br>
-5. Previous candle below SMA 50; current completed candle touches SMA 50 and closes above it<br><br>
-6. Stochastic RSI rounds to 100<br><br>
-7. RSI rounds to 50
-
-<p class="muted">Angle is an ATR-normalized calculated slope, not the visual angle on a chart.</p>
+<h3>Scanner rules</h3>
+<p class="small">
+1. Daily and Weekly supply zones: 2–6 candle base followed by strong bearish displacement.<br><br>
+2. Strong drop: at least 2 ATR within the next 1–3 candles.<br><br>
+3. Zone must be fresh and price must revisit it.<br><br>
+4. Completed 1H and 15M candles must both show bearish rejection in the same supply area.<br><br>
+5. Entry after the 15M rejection low breaks.<br><br>
+6. Stop loss above the higher rejection high with a 0.2% buffer.<br><br>
+7. Target 1 = 1R; Target 2 = 2R.
+</p>
 </div>
 
 <div class="box">
-<h3 class="good">Current matches</h3>
+<h3 class="good">SHORT signals</h3>
 <div class="wrap">
 <table>
-<thead><tr><th>Pair</th><th>Price</th><th>SMA50</th><th>Angle</th><th>Stoch RSI</th><th>RSI</th></tr></thead>
-<tbody id="results"><tr><td colspan="6">No scan yet</td></tr></tbody>
+<thead>
+<tr>
+<th>Pair</th><th>Zone</th><th>Supply Low</th><th>Supply High</th>
+<th>Entry</th><th>Stop Loss</th><th>Target 1</th><th>Target 2</th><th>Risk %</th>
+</tr>
+</thead>
+<tbody id="results">
+<tr><td colspan="9">No scan yet</td></tr>
+</tbody>
 </table>
 </div>
 </div>
 
 <div class="box">
-<h3>Previous 24-hour matches</h3>
-<div class="wrap">
-<table>
-<thead><tr><th>Pair</th><th>Time</th><th>Price</th><th>Angle</th><th>Stoch RSI</th><th>RSI</th></tr></thead>
-<tbody id="history"><tr><td colspan="6">No scan yet</td></tr></tbody>
-</table>
-</div>
+<h3>Rejected / diagnostic counts</h3>
+<div id="diagnostics" class="small">No scan yet</div>
 </div>
 
 <script>
 let stopped=false,busy=false;
 const $=id=>document.getElementById(id);
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 
-function sma(a,n,i){
- if(i+1<n)return null;
- let s=0;
- for(let j=i-n+1;j<=i;j++)s+=a[j];
- return s/n;
-}
-
-function rsi(a,n=14){
- let out=Array(a.length).fill(null);
- if(a.length<=n)return out;
- let g=0,l=0;
- for(let i=1;i<=n;i++){
-  const d=a[i]-a[i-1];
-  g+=Math.max(d,0);
-  l+=Math.max(-d,0);
- }
- g/=n;l/=n;
- out[n]=l===0?100:100-100/(1+g/l);
- for(let i=n+1;i<a.length;i++){
-  const d=a[i]-a[i-1];
-  g=(g*(n-1)+Math.max(d,0))/n;
-  l=(l*(n-1)+Math.max(-d,0))/n;
-  out[i]=l===0?100:100-100/(1+g/l);
- }
- return out;
-}
-
-function stochRSI(rv,i,n=14){
- if(i<n||rv[i]===null)return null;
- const a=rv.slice(i-n+1,i+1);
- if(a.length!==n||a.some(x=>x===null))return null;
- const lo=Math.min(...a),hi=Math.max(...a);
- return hi===lo?0:(rv[i]-lo)/(hi-lo)*100;
-}
-
-function atr(c,i,n=14){
- if(i<n)return null;
- let sum=0;
- for(let j=i-n+1;j<=i;j++){
-  const prev=c[j-1].close;
-  sum+=Math.max(c[j].high-c[j].low,Math.abs(c[j].high-prev),Math.abs(c[j].low-prev));
- }
- return sum/n;
-}
-
-function angle(values,c,i){
- const y=values.slice(i-4,i+1);
- if(y.length!==5||y.some(x=>x===null))return null;
- const mx=2,my=y.reduce((a,b)=>a+b,0)/5;
- let num=0,den=0;
- for(let j=0;j<5;j++){
-  num+=(j-mx)*(y[j]-my);
-  den+=(j-mx)**2;
- }
- const a=atr(c,i);
- if(!a||!Number.isFinite(a))return null;
- return Math.atan((num/den)/a)*180/Math.PI;
-}
-
-function normalizeTime(v){
- let t=Number(v);
- if(!Number.isFinite(t))return 0;
- if(t<1e11)t*=1000;
- return t;
-}
-
-function parseCandles(raw){
- let a=Array.isArray(raw)?raw:(raw?.data||raw?.candlesticks||raw?.result||[]);
- if(!Array.isArray(a))return [];
- return a.map(x=>{
-  if(Array.isArray(x)){
-   return {
-    time:normalizeTime(x[0]),
-    open:+x[1],high:+x[2],low:+x[3],
-    close:+x[4],volume:+x[5]||0
-   };
-  }
-  return {
-   time:normalizeTime(x.time??x.timestamp??x.t),
-   open:+x.open,high:+x.high,low:+x.low,
-   close:+x.close,volume:+x.volume||0
-  };
- }).filter(x=>x.time>0&&[x.open,x.high,x.low,x.close].every(Number.isFinite))
+function parse(raw){
+ const a=Array.isArray(raw)?raw:(raw?.candles||raw?.data||[]);
+ return a.map(x=>({
+  time:Number(x.time||x.timestamp),
+  open:Number(x.open),
+  high:Number(x.high),
+  low:Number(x.low),
+  close:Number(x.close),
+  volume:Number(x.volume||0)
+ })).filter(x=>x.time&&[x.open,x.high,x.low,x.close].every(Number.isFinite))
  .sort((a,b)=>a.time-b.time);
 }
 
-function aggregate15m(a){
- const m=new Map();
- for(const x of a){
-  const t=Math.floor(x.time/900000)*900000;
-  if(!m.has(t)){
-   m.set(t,{time:t,open:x.open,high:x.high,low:x.low,close:x.close,volume:x.volume});
+function aggregate(c,period){
+ const map=new Map();
+ for(const x of c){
+  const t=Math.floor(x.time/period)*period;
+  if(!map.has(t)){
+   map.set(t,{time:t,open:x.open,high:x.high,low:x.low,close:x.close,volume:x.volume});
   }else{
-   const z=m.get(t);
+   const z=map.get(t);
    z.high=Math.max(z.high,x.high);
    z.low=Math.min(z.low,x.low);
    z.close=x.close;
    z.volume+=x.volume;
   }
  }
- return [...m.values()].sort((a,b)=>a.time-b.time);
+ return [...map.values()].sort((a,b)=>a.time-b.time);
 }
 
-function matches(c){
- if(c.length<215)return [];
- const close=c.map(x=>x.close);
- const rv=rsi(close),s9=[],s20=[],s50=[],s200=[];
-
- for(let i=0;i<c.length;i++){
-  s9[i]=sma(close,9,i);
-  s20[i]=sma(close,20,i);
-  s50[i]=sma(close,50,i);
-  s200[i]=sma(close,200,i);
+function atr(c,i,n=14){
+ if(i<n)return null;
+ let sum=0;
+ for(let j=i-n+1;j<=i;j++){
+  const p=c[j-1].close;
+  sum+=Math.max(c[j].high-c[j].low,Math.abs(c[j].high-p),Math.abs(c[j].low-p));
  }
+ return sum/n;
+}
 
- const out=[],start=Date.now()-86400000;
+/*
+ Base-to-drop zone:
+ - Base consists of 2 to 6 relatively narrow candles.
+ - Base range must be no more than 1.5 ATR.
+ - Within next 1 to 3 candles, price must drop at least 2 ATR.
+ - Zone is the full high-low range of the base.
+*/
+function findSupplyZones(c,type){
+ const zones=[];
+ if(c.length<30)return zones;
 
- for(let i=200;i<c.length;i++){
-  if(!s9[i]||!s20[i]||!s50[i]||!s200[i]||i===0)continue;
+ for(let i=15;i<c.length-4;i++){
+  const a=atr(c,i);
+  if(!a||a<=0)continue;
 
-  const st=stochRSI(rv,i),r=rv[i],ang=angle(s50,c,i);
-  if(st===null||r===null||ang===null)continue;
+  for(let n=2;n<=6;n++){
+   const base=c.slice(i,i+n);
+   const baseHigh=Math.max(...base.map(x=>x.high));
+   const baseLow=Math.min(...base.map(x=>x.low));
 
-  const touch=
-   c[i-1].close<s50[i-1]&&
-   c[i].low<=s50[i]&&
-   c[i].high>=s50[i]&&
-   c[i].close>s50[i]&&
-   c[i].close>c[i-1].close;
+   if(baseHigh-baseLow>1.5*a)continue;
 
-  const ok=
-   s9[i]<s200[i]&&
-   s20[i]<s200[i]&&
-   s50[i]<s200[i]&&
-   ang>=-55&&ang<=-45&&
-   touch&&
-   Math.round(st)===100&&
-   Math.round(r)===50;
+   const after=c.slice(i+n,i+n+3);
+   if(!after.length)continue;
 
-  if(ok&&c[i].time>=start){
-   out.push({
-    time:c[i].time,price:c[i].close,
-    sma:s50[i],angle:ang,stoch:st,rsi:r
-   });
+   const lowest=Math.min(...after.map(x=>x.low));
+   const drop=baseLow-lowest;
+
+   if(drop<2*a)continue;
+
+   const firstDrop=after.findIndex(x=>x.close<baseLow);
+   if(firstDrop<0)continue;
+
+   const zone={
+    type,
+    low:baseLow,
+    high:baseHigh,
+    created:c[i+n-1].time,
+    baseEnd:i+n-1,
+    departure:i+n+firstDrop,
+    tested:false
+   };
+
+   // Reject zones already revisited after their bearish departure.
+   for(let j=zone.departure+1;j<c.length;j++){
+    if(c[j].high>=zone.low){
+     zone.tested=true;
+     break;
+    }
+   }
+
+   if(!zone.tested)zones.push(zone);
+   break;
   }
  }
- return out;
+ return zones;
 }
 
-async function scanPair(pair){
- const to=Math.floor(Date.now()/1000);
- const from=to-5*86400;
- const url='/api/candles?pair='+encodeURIComponent(pair)+'&from='+from+'&to='+to;
- const res=await fetch(url);
- if(!res.ok){
-  const body=await res.json().catch(()=>({}));
-  throw Error(body.error||('Candle HTTP '+res.status));
- }
- const raw=await res.json();
- const all=aggregate15m(parseCandles(raw));
- const cutoff=Math.floor(Date.now()/900000)*900000;
- const completed=all.filter(x=>x.time<cutoff);
- return matches(completed);
+function isBearishRejection(c,zone){
+ if(c.length<3)return null;
+ const x=c[c.length-1];
+ const prev=c[c.length-2];
+
+ const inZone=x.high>=zone.low&&x.low<=zone.high;
+ const bearish=x.close<x.open;
+ const upperWick=x.high-Math.max(x.open,x.close);
+ const body=Math.abs(x.open-x.close);
+
+ if(!inZone||!bearish||body===0)return null;
+ if(upperWick<body*0.5)return null;
+ if(x.close>=zone.low)return null;
+
+ return {candle:x,high:x.high,low:x.low,prevLow:prev.low};
+}
+
+async function getCandles(pair,interval,days){
+ const url='/api/candles?pair='+encodeURIComponent(pair)+
+ '&interval='+interval+'&days='+days;
+ const r=await fetch(url);
+ if(!r.ok)throw Error('HTTP '+r.status);
+ const data=await r.json();
+ if(data.success===false)throw Error(data.error||'Candle error');
+ return parse(data);
+}
+
+function completed(c,period){
+ const boundary=Math.floor(Date.now()/period)*period;
+ return c.filter(x=>x.time<boundary);
+}
+
+function getEntry(zone,oneHour,fifteen){
+ const h=isBearishRejection(oneHour,zone);
+ const m=isBearishRejection(fifteen,zone);
+ if(!h||!m)return null;
+
+ // Both rejection candles must overlap the same supply zone.
+ const entry=m.low;
+ const slBase=Math.max(h.high,m.high,zone.high);
+ const sl=slBase*1.002;
+
+ if(entry>=sl)return null;
+
+ const risk=sl-entry;
+ const t1=entry-risk;
+ const t2=entry-risk*2;
+
+ return {
+  entry,sl,t1,t2,
+  riskPct:risk/entry*100,
+  zone
+ };
+}
+
+function findCurrentZone(zones,price){
+ return zones
+  .filter(z=>price<=z.high&&price>=z.low*0.995)
+  .sort((a,b)=>
+   (a.type==="WEEKLY"?0:1)-(b.type==="WEEKLY"?0:1)
+  )[0]||null;
+}
+
+async function analyse(pair){
+ const [dailyRaw,hourRaw,fiveRaw]=await Promise.all([
+  getCandles(pair,"1D",220),
+  getCandles(pair,"60",10),
+  getCandles(pair,"5",5)
+ ]);
+
+ const daily=completed(dailyRaw,86400000);
+ const hourly=completed(hourRaw,3600000);
+ const five=completed(fiveRaw,300000);
+
+ if(daily.length<30||hourly.length<20||five.length<30)
+  return {reason:"Insufficient candles"};
+
+ const weekly=completed(aggregate(daily,604800000),604800000);
+ const zones=[
+  ...findSupplyZones(weekly,"WEEKLY"),
+  ...findSupplyZones(daily,"DAILY")
+ ];
+
+ if(!zones.length)return {reason:"No fresh supply zone"};
+
+ const fifteen=completed(aggregate(five,900000),900000);
+ if(fifteen.length<20)return {reason:"Insufficient 15m candles"};
+
+ const price=fifteen[fifteen.length-1].close;
+ const zone=findCurrentZone(zones,price);
+ if(!zone)return {reason:"Price not at supply"};
+
+ const signal=getEntry(zone,hourly,fifteen);
+ if(!signal)return {reason:"15m/1H rejection not confirmed"};
+
+ return {signal};
 }
 
 async function scan(){
  if(busy)return;
  busy=true;stopped=false;
- $('scanBtn').disabled=true;
- $('status').textContent='Connecting to CoinDCX...';
- $('results').innerHTML='';
- $('history').innerHTML='';
- $('checked').textContent='0';
- $('errors').textContent='0';
- $('matches').textContent='0';
- $('pairs').textContent='0';
+ $("start").disabled=true;
+ $("status").textContent="Loading CoinDCX futures pairs...";
+ $("results").innerHTML="";
+ $("diagnostics").textContent="Analysing...";
+ $("checked").textContent="0";
+ $("pairs").textContent="0";
+ $("signals").textContent="0";
+ $("errors").textContent="0";
 
  try{
-  const response=await fetch('/api/pairs');
-  if(!response.ok)throw Error('Pair discovery HTTP '+response.status);
-  const data=await response.json();
-  if(!data.success)throw Error(data.error||'Pair discovery failed');
+  const r=await fetch("/api/pairs");
+  if(!r.ok)throw Error("Pair discovery HTTP "+r.status);
+  const data=await r.json();
+  if(!data.success)throw Error(data.error||"Pair discovery failed");
 
-  const raw=data.pairs;
-  let pairs=(Array.isArray(raw)?raw:[]).map(x=>
-   typeof x==='string'?x:(x.pair||x.instrument||x.symbol||'')
+  let pairs=(data.pairs||[]).map(x=>
+   typeof x==="string"?x:(x.pair||x.instrument||x.symbol||"")
   ).filter(x=>/^B-[A-Z0-9_-]+_USDT$/.test(x));
-
   pairs=[...new Set(pairs)];
-  $('pairs').textContent=pairs.length;
-  if(!pairs.length)throw Error('CoinDCX returned no USDT futures pairs');
+  $("pairs").textContent=pairs.length;
+  if(!pairs.length)throw Error("No USDT futures pairs found");
 
-  let current=[],history=[],checked=0,errors=0,index=0;
-  $('status').textContent='Scanning '+pairs.length+' CoinDCX pairs...';
+  let index=0,checked=0,errors=0,signals=[];
+  const reasons={};
 
   async function worker(){
    while(index<pairs.length&&!stopped){
     const pair=pairs[index++];
     try{
-     const found=await scanPair(pair);
-     for(const x of found){
-      const row={pair,...x};
-      history.push(row);
-      if(Date.now()-x.time<1800000)current.push(row);
-     }
-    }catch(e){errors++;}
+     const result=await analyse(pair);
+     if(result.signal)signals.push({pair,...result.signal});
+     else reasons[result.reason]=(reasons[result.reason]||0)+1;
+    }catch(e){
+     errors++;
+     reasons["API/data error"]=(reasons["API/data error"]||0)+1;
+    }
     checked++;
-    $('checked').textContent=checked;
-    $('errors').textContent=errors;
-    $('matches').textContent=current.length;
-    $('status').textContent='Scanning '+checked+' / '+pairs.length;
+    $("checked").textContent=checked;
+    $("errors").textContent=errors;
+    $("signals").textContent=signals.length;
+    $("status").textContent="Scanning "+checked+" / "+pairs.length;
    }
   }
 
-  await Promise.all([worker(),worker(),worker()]);
-  if(stopped){$('status').textContent='Scan stopped';return;}
+  await Promise.all([worker(),worker()]);
+  if(stopped){
+   $("status").textContent="Scan stopped";
+   return;
+  }
 
-  current.sort((a,b)=>b.time-a.time);
-  history.sort((a,b)=>b.time-a.time);
-  $('matches').textContent=current.length;
+  signals.sort((a,b)=>a.riskPct-b.riskPct);
 
-  $('results').innerHTML=current.length?current.map(x=>
-   `<tr><td>${x.pair}</td><td>${x.price}</td><td>${x.sma}</td><td>${x.angle.toFixed(2)}°</td><td>${x.stoch.toFixed(2)}</td><td>${x.rsi.toFixed(2)}</td></tr>`
-  ).join(''):'<tr><td colspan="6">No current matches</td></tr>';
+  $("results").innerHTML=signals.length?signals.map(x=>
+   `<tr>
+   <td>${x.pair}</td>
+   <td><span class="tag">${x.zone.type}</span></td>
+   <td>${x.zone.low}</td>
+   <td>${x.zone.high}</td>
+   <td class="good">${x.entry}</td>
+   <td class="bad">${x.sl}</td>
+   <td>${x.t1}</td>
+   <td>${x.t2}</td>
+   <td>${x.riskPct.toFixed(2)}%</td>
+   </tr>`
+  ).join(""):'<tr><td colspan="9">No confirmed SHORT setup found</td></tr>';
 
-  $('history').innerHTML=history.length?history.map(x=>
-   `<tr><td>${x.pair}</td><td>${new Date(x.time).toLocaleString()}</td><td>${x.price}</td><td>${x.angle.toFixed(2)}°</td><td>${x.stoch.toFixed(2)}</td><td>${x.rsi.toFixed(2)}</td></tr>`
-  ).join(''):'<tr><td colspan="6">No historical matches</td></tr>';
+  $("diagnostics").innerHTML=Object.entries(reasons)
+   .map(([k,v])=>k+": "+v).join("<br>")||"No rejected pairs";
 
-  $('status').textContent='Scan complete. '+checked+' pairs checked; '+errors+' API errors.';
+  $("status").textContent=
+   "Scan complete: "+checked+" pairs checked; "+signals.length+
+   " confirmed setups; "+errors+" errors.";
+
  }catch(e){
-  $('status').textContent='ERROR: '+e.message;
+  $("status").textContent="ERROR: "+e.message;
  }finally{
   busy=false;
-  $('scanBtn').disabled=false;
+  $("start").disabled=false;
  }
 }
 
 function stopScan(){
  stopped=true;
- $('status').textContent='Stopping scan...';
+ $("status").textContent="Stopping scan...";
 }
 </script>
 </body>
