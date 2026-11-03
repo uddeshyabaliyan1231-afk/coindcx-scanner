@@ -1,0 +1,12 @@
+{
+  "name": "coindcx-scanner",
+  "version": "1.0.0",
+  "description": "CoinDCX 15 minute futures scanner",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.21.2"
+  }
+}
