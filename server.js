@@ -23,7 +23,7 @@ async function getJSON(url) {
   const body = await response.text();
 
   if (!response.ok) {
-    throw new Error("HTTP " + response.status + ": " + body.slice(0, 300));
+    throw new Error("CoinDCX HTTP " + response.status + ": " + body.slice(0, 300));
   }
 
   return JSON.parse(body);
@@ -31,11 +31,13 @@ async function getJSON(url) {
 
 function extractPairs(data) {
   if (!Array.isArray(data)) {
-    throw new Error("Unexpected instruments response");
+    throw new Error("Unexpected CoinDCX instruments response");
   }
 
   return [...new Set(data.map(item => {
-    if (typeof item === "string") return item.trim().toUpperCase();
+    if (typeof item === "string") {
+      return item.trim().toUpperCase();
+    }
 
     return String(
       item?.pair ||
@@ -46,17 +48,27 @@ function extractPairs(data) {
   }).filter(pair => /^B-[A-Z0-9_-]+_USDT$/.test(pair)))];
 }
 
+async function getActivePairs() {
+  const data = await getJSON(
+    BASE + "/exchange/v1/derivatives/futures/data/active_instruments?margin_currency_short_name[]=USDT"
+  );
+
+  return extractPairs(data);
+}
+
 app.get("/health", (req, res) => {
-  res.json({ success: true, status: "online" });
+  res.json({
+    success: true,
+    status: "online",
+    exchange: "CoinDCX"
+  });
 });
+
+// ACTIVE FUTURES PAIRS
 
 app.get("/api/pairs", async (req, res) => {
   try {
-    const data = await getJSON(
-      BASE + "/exchange/v1/derivatives/futures/data/active_instruments?margin_currency_short_name[]=USDT"
-    );
-
-    const pairs = extractPairs(data);
+    const pairs = await getActivePairs();
 
     res.json({
       success: true,
@@ -77,53 +89,61 @@ app.get("/api/pairs", async (req, res) => {
   }
 });
 
+// LIVE PRICES
+
 app.get("/api/prices", async (req, res) => {
   try {
-    const [instrumentData, priceData] = await Promise.all([
-      getJSON(
-        BASE + "/exchange/v1/derivatives/futures/data/active_instruments?margin_currency_short_name[]=USDT"
-      ),
-      getJSON(
-        PUBLIC + "/market_data/v3/current_prices/futures/rt"
-      )
+    const [activePairs, priceData] = await Promise.all([
+      getActivePairs(),
+      getJSON(PUBLIC + "/market_data/v3/current_prices/futures/rt")
     ]);
 
-    const activePairs = extractPairs(instrumentData);
-
-    const priceContainer =
+    // CoinDCX may return the pair map directly,
+    // or inside a prices/data wrapper.
+    let priceContainer =
       priceData?.prices ||
       priceData?.data?.prices ||
       priceData?.result?.prices ||
-      {};
+      priceData;
 
-    const priceKeys = Object.keys(priceContainer);
+    if (
+      priceContainer &&
+      !Array.isArray(priceContainer) &&
+      typeof priceContainer === "object" &&
+      priceContainer.data &&
+      typeof priceContainer.data === "object"
+    ) {
+      priceContainer = priceContainer.data;
+    }
 
     const prices = {};
 
     for (const pair of activePairs) {
-      const value = priceContainer[pair];
+      const value = priceContainer?.[pair];
 
-      if (value !== undefined && value !== null) {
-        prices[pair] = value;
+      if (value && typeof value === "object") {
+        const lastPrice = Number(value.ls);
+        const markPrice = Number(value.mp);
+
+        if (
+          Number.isFinite(lastPrice) ||
+          Number.isFinite(markPrice)
+        ) {
+          prices[pair] = {
+            last_price: Number.isFinite(lastPrice) ? lastPrice : null,
+            mark_price: Number.isFinite(markPrice) ? markPrice : null,
+            volume: Number(value.v) || 0,
+            market: value.mkt || pair
+          };
+        }
       }
     }
 
     res.json({
       success: true,
       exchange: "CoinDCX",
+      active_pairs: activePairs.length,
       count: Object.keys(prices).length,
-
-      diagnostics: {
-        activePairCount: activePairs.length,
-        activePairsSample: activePairs.slice(0, 10),
-        priceResponseTopLevelKeys: Object.keys(priceData || {}),
-        priceContainerCount: priceKeys.length,
-        priceKeysSample: priceKeys.slice(0, 10),
-        priceSample: priceKeys.length
-          ? priceContainer[priceKeys[0]]
-          : null
-      },
-
       prices
     });
 
@@ -135,6 +155,8 @@ app.get("/api/prices", async (req, res) => {
   }
 });
 
+// CANDLE DATA
+
 app.get("/api/candles", async (req, res) => {
   try {
     const pair = String(req.query.pair || "").toUpperCase();
@@ -143,32 +165,29 @@ app.get("/api/candles", async (req, res) => {
     if (!/^B-[A-Z0-9_-]+_USDT$/.test(pair)) {
       return res.status(400).json({
         success: false,
-        error: "Invalid pair"
+        error: "Invalid CoinDCX USDT pair"
       });
     }
 
     if (!["1", "5", "60", "1D"].includes(interval)) {
       return res.status(400).json({
         success: false,
-        error: "Invalid interval"
+        error: "Invalid candle interval"
       });
     }
 
-    const instrumentData = await getJSON(
-      BASE + "/exchange/v1/derivatives/futures/data/active_instruments?margin_currency_short_name[]=USDT"
-    );
-
-    const activePairs = extractPairs(instrumentData);
+    const activePairs = await getActivePairs();
 
     if (!activePairs.includes(pair)) {
       return res.status(404).json({
         success: false,
-        error: "Inactive CoinDCX pair"
+        error: "Pair is not active on CoinDCX"
       });
     }
 
     const now = Math.floor(Date.now() / 1000);
-    const from = now - 10 * 24 * 60 * 60;
+    const days = interval === "1D" ? 180 : 10;
+    const from = now - days * 86400;
 
     const url =
       PUBLIC +
@@ -176,13 +195,13 @@ app.get("/api/candles", async (req, res) => {
       encodeURIComponent(pair) +
       "&from=" + from +
       "&to=" + now +
-      "&resolution=" + interval +
+      "&resolution=" + encodeURIComponent(interval) +
       "&pcode=f";
 
     const data = await getJSON(url);
 
     if (data.s !== "ok" || !Array.isArray(data.data)) {
-      throw new Error("Invalid candle response");
+      throw new Error("Invalid CoinDCX candle response");
     }
 
     res.json({
@@ -202,5 +221,5 @@ app.get("/api/candles", async (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log("CoinDCX diagnostic scanner running on port " + PORT);
+  console.log("CoinDCX Scanner running on port " + PORT);
 });
