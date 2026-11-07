@@ -1,74 +1,59 @@
 
 const express = require("express");
-const https = require("https");
 const path = require("path");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-function getJSON(url) {
-  return new Promise((resolve, reject) => {
-    const req = https.get(url, {
-      headers: {
-        "User-Agent": "CoinDCX-Verified-Scanner/2.0",
-        "Accept": "application/json"
-      }
-    }, (res) => {
-      let body = "";
-
-      res.on("data", chunk => body += chunk);
-
-      res.on("end", () => {
-        if (res.statusCode < 200 || res.statusCode >= 300) {
-          return reject(
-            new Error("CoinDCX HTTP " + res.statusCode)
-          );
-        }
-
-        try {
-          resolve(JSON.parse(body));
-        } catch (e) {
-          reject(new Error("Invalid JSON response"));
-        }
-      });
-    });
-
-    req.setTimeout(15000, () => {
-      req.destroy(new Error("API timeout"));
-    });
-
-    req.on("error", reject);
-  });
-}
-
-function unwrapArray(value) {
-  if (Array.isArray(value)) return value;
-  if (value && Array.isArray(value.data)) return value.data;
-  if (value && Array.isArray(value.result)) return value.result;
-  if (value && Array.isArray(value.instruments)) {
-    return value.instruments;
-  }
-  return [];
-}
-
-function getPair(item) {
-  if (typeof item === "string") return item;
-  if (!item || typeof item !== "object") return "";
-
-  return String(
-    item.pair ||
-    item.instrument_name ||
-    item.symbol ||
-    item.market ||
-    ""
-  );
-}
-
-const PAIRS_URL =
-  "https://api.coindcx.com/exchange/v1/derivatives/futures/data/active_instruments?margin_currency_short_name[]=USDT";
-
+app.use(express.json());
 app.use(express.static(path.join(__dirname, "public")));
 
+const BASE = "https://api.coindcx.com";
+const PUBLIC = "https://public.coindcx.com";
+
+async function getJSON(url) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 20000);
+
+  try {
+    const response = await fetch(url, {
+      headers: {
+        "Accept": "application/json",
+        "User-Agent": "Mozilla/5.0 CoinDCXScanner"
+      },
+      signal: controller.signal
+    });
+
+    const body = await response.text();
+
+    if (!response.ok) {
+      throw new Error("HTTP " + response.status + ": " + body.slice(0, 150));
+    }
+
+    return JSON.parse(body);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function extractPairs(data) {
+  if (!Array.isArray(data)) {
+    throw new Error("Unexpected CoinDCX instruments response");
+  }
+
+  return [...new Set(data.map(item => {
+    if (typeof item === "string") return item.trim().toUpperCase();
+
+    return String(
+      item?.pair ||
+      item?.symbol ||
+      item?.instrument_name ||
+      ""
+    ).trim().toUpperCase();
+  }).filter(pair => /^B-[A-Z0-9_-]+_USDT$/.test(pair)))];
+}
+
+// Health
 app.get("/health", (req, res) => {
   res.json({
     success: true,
@@ -77,18 +62,20 @@ app.get("/health", (req, res) => {
   });
 });
 
-// ACTIVE COINDCX PAIRS
+// Active pairs
 app.get("/api/pairs", async (req, res) => {
   try {
-    const raw = await getJSON(PAIRS_URL);
+    const url = BASE +
+      "/exchange/v1/derivatives/futures/data/active_instruments?margin_currency_short_name[]=USDT";
 
-    const pairs = unwrapArray(raw)
-      .map(getPair)
-      .filter(Boolean);
+    const data = await getJSON(url);
+    const pairs = extractPairs(data);
 
     if (!pairs.length) {
-      throw new Error("No active CoinDCX pairs found");
+      throw new Error("CoinDCX returned zero valid USDT pairs");
     }
+
+    console.log("CoinDCX active pairs:", pairs.length);
 
     res.set("Cache-Control", "no-store");
 
@@ -96,38 +83,45 @@ app.get("/api/pairs", async (req, res) => {
       success: true,
       exchange: "CoinDCX",
       count: pairs.length,
-      pairs
+      pairs: pairs.map(pair => ({
+        pair,
+        symbol: pair,
+        instrument_name: pair,
+        market: pair
+      }))
     });
 
-  } catch (e) {
-    console.error("PAIR ERROR:", e.message);
+  } catch (error) {
+    console.error("PAIRS ERROR:", error.message);
 
     res.status(502).json({
       success: false,
-      error: e.message
+      exchange: "CoinDCX",
+      error: error.message,
+      pairs: []
     });
   }
 });
 
-// LIVE FUTURES PRICES
+// Live futures prices
 app.get("/api/prices", async (req, res) => {
   try {
-    const [pairData, priceData] = await Promise.all([
-      getJSON(PAIRS_URL),
-      getJSON(
-        "https://public.coindcx.com/market_data/v3/current_prices/futures/rt"
-      )
-    ]);
+    const pairData = await getJSON(
+      BASE +
+      "/exchange/v1/derivatives/futures/data/active_instruments?margin_currency_short_name[]=USDT"
+    );
 
-    const active = unwrapArray(pairData)
-      .map(getPair)
-      .filter(Boolean);
+    const pairs = extractPairs(pairData);
 
-    const allowed = new Set(active);
+    const priceData = await getJSON(
+      PUBLIC + "/market_data/v3/current_prices/futures/rt"
+    );
+
+    const allowed = new Set(pairs);
     const prices = {};
 
     for (const [key, value] of Object.entries(priceData || {})) {
-      if (allowed.has(key) && value) {
+      if (allowed.has(key)) {
         prices[key] = value;
       }
     }
@@ -137,82 +131,71 @@ app.get("/api/prices", async (req, res) => {
     res.json({
       success: true,
       exchange: "CoinDCX",
-      activeCount: active.length,
+      count: Object.keys(prices).length,
       prices
     });
 
-  } catch (e) {
-    console.error("PRICE ERROR:", e.message);
+  } catch (error) {
+    console.error("PRICE ERROR:", error.message);
 
     res.status(502).json({
       success: false,
-      error: e.message
+      error: error.message,
+      prices: {}
     });
   }
 });
 
-// COINDCX VERIFIED CANDLES
+// Candles
 app.get("/api/candles", async (req, res) => {
   try {
-    const pair = String(req.query.pair || "");
-    const interval = String(req.query.interval || "15");
+    const pair = String(req.query.pair || "").trim().toUpperCase();
+    const interval = String(req.query.interval || "5");
 
-    const allowedIntervals = ["5", "15", "60", "1D"];
-
-    if (!/^[A-Za-z0-9_-]+$/.test(pair)) {
+    if (!/^B-[A-Z0-9_-]+_USDT$/.test(pair)) {
       return res.status(400).json({
         success: false,
-        error: "Invalid pair"
+        error: "Invalid CoinDCX pair"
       });
     }
 
-    if (!allowedIntervals.includes(interval)) {
+    if (!["1", "5", "60", "1D"].includes(interval)) {
       return res.status(400).json({
         success: false,
-        error: "Invalid interval"
+        error: "Unsupported interval"
       });
     }
 
-    // Verify pair against active CoinDCX contracts
-    const rawPairs = await getJSON(PAIRS_URL);
+    const active = extractPairs(await getJSON(
+      BASE +
+      "/exchange/v1/derivatives/futures/data/active_instruments?margin_currency_short_name[]=USDT"
+    ));
 
-    const activePairs = unwrapArray(rawPairs)
-      .map(getPair);
-
-    if (!activePairs.includes(pair)) {
+    if (!active.includes(pair)) {
       return res.status(403).json({
         success: false,
-        error: "Pair not listed on CoinDCX"
+        error: "Pair not active on CoinDCX"
       });
     }
 
-    const limit = Math.min(
-      Math.max(Number(req.query.limit) || 100, 55),
-      200
+    const days = Math.min(30, Math.max(1, Number(req.query.days) || 7));
+    const to = Math.floor(Date.now() / 1000);
+    const from = to - days * 86400;
+
+    const params = new URLSearchParams({
+      pair,
+      from: String(from),
+      to: String(to),
+      resolution: interval,
+      pcode: "f"
+    });
+
+    const data = await getJSON(
+      PUBLIC + "/market_data/candlesticks?" + params.toString()
     );
 
-    const to = Math.floor(Date.now() / 1000);
-
-    const seconds =
-      interval === "60" ? 3600 :
-      interval === "1D" ? 86400 :
-      Number(interval) * 60;
-
-    const from = to - limit * seconds;
-
-    const url =
-      "https://public.coindcx.com/market_data/candlesticks?" +
-      "pair=" + encodeURIComponent(pair) +
-      "&from=" + from +
-      "&to=" + to +
-      "&resolution=" + encodeURIComponent(interval) +
-      "&pcode=f";
-
-    const raw = await getJSON(url);
-    const candles = unwrapArray(raw);
-
-    if (!candles.length) {
-      throw new Error("No CoinDCX candles returned");
+    if (data.s !== "ok" || !Array.isArray(data.data)) {
+      throw new Error("Invalid CoinDCX candle response");
     }
 
     res.set("Cache-Control", "no-store");
@@ -222,21 +205,20 @@ app.get("/api/candles", async (req, res) => {
       exchange: "CoinDCX",
       pair,
       interval,
-      candles
+      candles: data.data
     });
 
-  } catch (e) {
-    console.error("CANDLE ERROR:", e.message);
+  } catch (error) {
+    console.error("CANDLE ERROR:", error.message);
 
     res.status(502).json({
       success: false,
-      error: e.message
+      error: error.message,
+      candles: []
     });
   }
 });
 
 app.listen(PORT, "0.0.0.0", () => {
-  console.log(
-    "CoinDCX verified scanner running on port " + PORT
-  );
+  console.log("CoinDCX scanner backend running on port " + PORT);
 });
