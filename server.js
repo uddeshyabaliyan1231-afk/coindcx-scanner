@@ -9,83 +9,234 @@ const PORT = process.env.PORT || 3000;
 function getJSON(url) {
   return new Promise((resolve, reject) => {
     const req = https.get(url, {
-      headers: { "User-Agent": "CoinDCX-Supply-Scanner/1.0" }
-    }, res => {
+      headers: {
+        "User-Agent": "CoinDCX-Verified-Scanner/2.0",
+        "Accept": "application/json"
+      }
+    }, (res) => {
       let body = "";
+
       res.on("data", chunk => body += chunk);
+
       res.on("end", () => {
-        if (res.statusCode !== 200)
-          return reject(new Error("CoinDCX HTTP " + res.statusCode));
-        try { resolve(JSON.parse(body)); }
-        catch (e) { reject(e); }
+        if (res.statusCode < 200 || res.statusCode >= 300) {
+          return reject(
+            new Error("CoinDCX HTTP " + res.statusCode)
+          );
+        }
+
+        try {
+          resolve(JSON.parse(body));
+        } catch (e) {
+          reject(new Error("Invalid JSON response"));
+        }
       });
     });
-    req.setTimeout(20000, () => req.destroy(new Error("API timeout")));
+
+    req.setTimeout(15000, () => {
+      req.destroy(new Error("API timeout"));
+    });
+
     req.on("error", reject);
   });
 }
 
-function arr(x) {
-  if (Array.isArray(x)) return x;
-  if (x && Array.isArray(x.data)) return x.data;
-  if (x && Array.isArray(x.result)) return x.result;
-  if (x && Array.isArray(x.instruments)) return x.instruments;
+function unwrapArray(value) {
+  if (Array.isArray(value)) return value;
+  if (value && Array.isArray(value.data)) return value.data;
+  if (value && Array.isArray(value.result)) return value.result;
+  if (value && Array.isArray(value.instruments)) {
+    return value.instruments;
+  }
   return [];
 }
 
+function getPair(item) {
+  if (typeof item === "string") return item;
+  if (!item || typeof item !== "object") return "";
+
+  return String(
+    item.pair ||
+    item.instrument_name ||
+    item.symbol ||
+    item.market ||
+    ""
+  );
+}
+
+const PAIRS_URL =
+  "https://api.coindcx.com/exchange/v1/derivatives/futures/data/active_instruments?margin_currency_short_name[]=USDT";
+
 app.use(express.static(path.join(__dirname, "public")));
 
-app.get("/health", (req, res) =>
-  res.json({ success: true, status: "online" })
-);
+app.get("/health", (req, res) => {
+  res.json({
+    success: true,
+    status: "online",
+    exchange: "CoinDCX"
+  });
+});
 
+// ACTIVE COINDCX PAIRS
 app.get("/api/pairs", async (req, res) => {
   try {
-    const url =
-      "https://api.coindcx.com/exchange/v1/derivatives/futures/data/active_instruments?margin_currency_short_name[]=USDT";
-    const data = await getJSON(url);
-    const pairs = arr(data);
-    res.json({ success: true, pairs });
+    const raw = await getJSON(PAIRS_URL);
+
+    const pairs = unwrapArray(raw)
+      .map(getPair)
+      .filter(Boolean);
+
+    if (!pairs.length) {
+      throw new Error("No active CoinDCX pairs found");
+    }
+
+    res.set("Cache-Control", "no-store");
+
+    res.json({
+      success: true,
+      exchange: "CoinDCX",
+      count: pairs.length,
+      pairs
+    });
+
   } catch (e) {
     console.error("PAIR ERROR:", e.message);
-    res.status(502).json({ success: false, error: e.message });
+
+    res.status(502).json({
+      success: false,
+      error: e.message
+    });
   }
 });
 
+// LIVE FUTURES PRICES
+app.get("/api/prices", async (req, res) => {
+  try {
+    const [pairData, priceData] = await Promise.all([
+      getJSON(PAIRS_URL),
+      getJSON(
+        "https://public.coindcx.com/market_data/v3/current_prices/futures/rt"
+      )
+    ]);
+
+    const active = unwrapArray(pairData)
+      .map(getPair)
+      .filter(Boolean);
+
+    const allowed = new Set(active);
+    const prices = {};
+
+    for (const [key, value] of Object.entries(priceData || {})) {
+      if (allowed.has(key) && value) {
+        prices[key] = value;
+      }
+    }
+
+    res.set("Cache-Control", "no-store");
+
+    res.json({
+      success: true,
+      exchange: "CoinDCX",
+      activeCount: active.length,
+      prices
+    });
+
+  } catch (e) {
+    console.error("PRICE ERROR:", e.message);
+
+    res.status(502).json({
+      success: false,
+      error: e.message
+    });
+  }
+});
+
+// COINDCX VERIFIED CANDLES
 app.get("/api/candles", async (req, res) => {
   try {
     const pair = String(req.query.pair || "");
-    const interval = String(req.query.interval || "5");
-    const allowed = ["5", "60", "1D"];
+    const interval = String(req.query.interval || "15");
 
-    if (!/^B-[A-Z0-9_-]+_USDT$/.test(pair))
-      return res.status(400).json({ error: "Invalid pair" });
+    const allowedIntervals = ["5", "15", "60", "1D"];
 
-    if (!allowed.includes(interval))
-      return res.status(400).json({ error: "Invalid interval" });
+    if (!/^[A-Za-z0-9_-]+$/.test(pair)) {
+      return res.status(400).json({
+        success: false,
+        error: "Invalid pair"
+      });
+    }
+
+    if (!allowedIntervals.includes(interval)) {
+      return res.status(400).json({
+        success: false,
+        error: "Invalid interval"
+      });
+    }
+
+    // Verify pair against active CoinDCX contracts
+    const rawPairs = await getJSON(PAIRS_URL);
+
+    const activePairs = unwrapArray(rawPairs)
+      .map(getPair);
+
+    if (!activePairs.includes(pair)) {
+      return res.status(403).json({
+        success: false,
+        error: "Pair not listed on CoinDCX"
+      });
+    }
+
+    const limit = Math.min(
+      Math.max(Number(req.query.limit) || 100, 55),
+      200
+    );
 
     const to = Math.floor(Date.now() / 1000);
-    const days = Math.min(Math.max(Number(req.query.days) || 7, 1), 220);
-    const from = to - days * 86400;
+
+    const seconds =
+      interval === "60" ? 3600 :
+      interval === "1D" ? 86400 :
+      Number(interval) * 60;
+
+    const from = to - limit * seconds;
 
     const url =
-      "https://public.coindcx.com/market_data/candlesticks?pair=" +
-      encodeURIComponent(pair) +
+      "https://public.coindcx.com/market_data/candlesticks?" +
+      "pair=" + encodeURIComponent(pair) +
       "&from=" + from +
       "&to=" + to +
-      "&resolution=" + interval +
+      "&resolution=" + encodeURIComponent(interval) +
       "&pcode=f";
 
-    const data = await getJSON(url);
-    const candles = arr(data);
+    const raw = await getJSON(url);
+    const candles = unwrapArray(raw);
 
-    res.json({ success: true, candles });
+    if (!candles.length) {
+      throw new Error("No CoinDCX candles returned");
+    }
+
+    res.set("Cache-Control", "no-store");
+
+    res.json({
+      success: true,
+      exchange: "CoinDCX",
+      pair,
+      interval,
+      candles
+    });
+
   } catch (e) {
-    console.error("CANDLE ERROR:", req.query.pair, e.message);
-    res.status(502).json({ success: false, error: e.message });
+    console.error("CANDLE ERROR:", e.message);
+
+    res.status(502).json({
+      success: false,
+      error: e.message
+    });
   }
 });
 
-app.listen(PORT, "0.0.0.0", () =>
-  console.log("Supply Zone Scanner running on port " + PORT)
-);
+app.listen(PORT, "0.0.0.0", () => {
+  console.log(
+    "CoinDCX verified scanner running on port " + PORT
+  );
+});
